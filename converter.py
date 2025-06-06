@@ -230,6 +230,7 @@ def process_video(
     max_shift: int,
     near_depth: float | None = None,
     far_depth: float | None = None,
+    quality: tuple[str, int] = ("crf", 23),
 ) -> Path:
     """
     Core routine:
@@ -265,21 +266,40 @@ def process_video(
     if far_depth is not None:
         inv_min = 1.0 / (far_depth + 1e-6)
 
-    # Choose H.264 (NVENC) or fallback to mp4v
-    fourcc_try = [("H264", "NVENC"), ("mp4v", "CPU")]
-    writer = None
+
+    # Encode via FFmpeg to avoid huge files from OpenCV's VideoWriter
     tmp_mp4 = out_dir / (src_path.stem + "_3D_TEMP.mp4")
 
-    for c, note in fourcc_try:
-        four = cv2.VideoWriter_fourcc(*c)
-        writer = cv2.VideoWriter(str(tmp_mp4), four, fps, (sbs_w, height))
-        if writer.isOpened():
-            enc_note = note
-            break
-        writer.release()
-        writer = None
-    if writer is None:
-        raise RuntimeError("Could not open VideoWriter with any codec")
+    # Select h264_nvenc when CUDA is available, otherwise libx264
+    use_nvenc = torch.cuda.is_available()
+
+    enc = "h264_nvenc" if use_nvenc else "libx264"
+    enc_note = "NVENC" if use_nvenc else "CPU"
+
+    if quality[0] == "bitrate":
+        q_args = ["-b:v", f"{quality[1]}k"]
+    else:
+        if use_nvenc:
+            q_args = ["-cq", str(quality[1])]
+        else:
+            q_args = ["-crf", str(quality[1])]
+
+    ffmpeg_cmd = [
+        FFMPEG, "-y",
+        "-f", "rawvideo",
+        "-pix_fmt", "bgr24",
+        "-s", f"{sbs_w}x{height}",
+        "-r", str(fps),
+        "-i", "-",
+        "-an",
+        "-c:v", enc,
+        "-preset", "fast" if use_nvenc else "veryfast",
+        "-pix_fmt", "yuv420p",
+        *q_args,
+        str(tmp_mp4)
+    ]
+
+    proc = subprocess.Popen(ffmpeg_cmd, stdin=subprocess.PIPE)
 
     with torch.no_grad():
         pbar = tqdm(total=total if total else None,
@@ -317,14 +337,15 @@ def process_video(
 
             # 4) Generate stereo pair (left|right)
             sbs = generate_sbs(frame, disp)
-            writer.write(sbs)
+            proc.stdin.write(sbs.tobytes())
 
             pbar.update(1)
 
         pbar.close()
 
     cap.release()
-    writer.release()
+    proc.stdin.close()
+    proc.wait()
 
     # 5) Mux original audio into the silent stereo
     final_mp4 = out_dir / (src_path.stem + "_3D_HSBS.mp4")
@@ -379,6 +400,21 @@ def ask_depth_range():
     far = float(far_s) if far_s else None
     return near, far
 
+def ask_quality():
+    """Prompt for bitrate (kbps) or CRF/CQ value."""
+    root = Tk(); root.withdraw()
+    q = simpledialog.askstring(
+        "Encoding Quality",
+        "Enter bitrate in kbps or 'crf=VALUE' (blank=crf=23):",
+    )
+    root.destroy()
+    if not q:
+        return ("crf", 23)
+    q = q.strip().lower()
+    if q.startswith("crf="):
+        return ("crf", int(q.split("=",1)[1]))
+    return ("bitrate", int(q))
+
 # -------------------------------------------------------------------------
 def main():
     print("=== Portable 2D-to-3D Converter (Depth-Anything) ===")
@@ -395,10 +431,11 @@ def main():
         return
 
     near, far = ask_depth_range()
+    quality = ask_quality()
 
     try:
         t0 = time.time()
-        out = process_video(src, outdir, shift, near, far)
+        out = process_video(src, outdir, shift, near, far, quality)
         elapsed_min = (time.time() - t0) / 60
         messagebox.showinfo(
             "Done",
