@@ -38,6 +38,7 @@ Portable 2-D ➜ 3-D Converter (2025 Depth-Anything Edition)
             • opencv-python, numpy, tqdm, timm
         ▸ Download FFmpeg static build (~70 MB) → `ffmpeg.exe`
         ▸ Download Depth-Anything ViT-L-14 weights (~450 MB) → `models\depth_anything_vitl14.pth`
+        ▸ Clone Depth-Anything repo (if missing) → `Depth-Anything\`
         ▸ Launch `converter.py` using the new `env\`
       All of that may take **3–6 minutes** (depends on your Internet speed and GPU driver checks).
 
