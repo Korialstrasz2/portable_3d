@@ -215,40 +215,46 @@ def process_video(src_path: Path, out_dir: Path, max_shift: int, enc_quality: st
         ff_cmd += ["-crf", enc_quality]
     ff_cmd += ["-pix_fmt", "yuv420p", str(tmp_mp4)]
 
-    proc = subprocess.Popen(ff_cmd, stdin=subprocess.PIPE)
+    with subprocess.Popen(
+        ff_cmd,
+        stdin=subprocess.PIPE,
+        bufsize=10**7,  # larger pipe buffer for high-res frames
+    ) as proc:
+        with torch.no_grad():
+            pbar = tqdm(total=total if total else None,
+                        unit="frame", desc=f"Converting ({encoder})")
+            while True:
+                ret, frame = cap.read()
+                if not ret:
+                    break
 
-    with torch.no_grad():
-        pbar = tqdm(total=total if total else None,
-                    unit="frame", desc=f"Converting ({encoder})")
-        while True:
-            ret, frame = cap.read()
-            if not ret:
-                break
+                # 1) Prepare frame for Depth-Anything
+                img_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
+                #    • Wrap in a dict for the Depth-Anything transforms
+                sample   = {"image": img_rgb}
+                sample   = transform(sample)               # returns a dict, with "image" as the processed array
+                img_tens = torch.from_numpy(sample["image"]).unsqueeze(0).to(device)
+                inp      = img_tens
 
-            # 1) Prepare frame for Depth-Anything
-            img_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
-            #    • Wrap in a dict for the Depth-Anything transforms
-            sample   = {"image": img_rgb}
-            sample   = transform(sample)               # returns a dict, with "image" as the processed array
-            img_tens = torch.from_numpy(sample["image"]).unsqueeze(0).to(device)
-            inp      = img_tens  
+                # 2) Forward pass: get depth, resize to original resolution
+                depth = model(inp)
+                depth = F.interpolate(
+                    depth.unsqueeze(1),
+                    size=(height, width),
+                    mode="bicubic",
+                    align_corners=False,
+                )
+                depth_map = depth.squeeze().cpu().numpy()
 
-            # 2) Forward pass: get depth, resize to original resolution
-            depth = model(inp)
-            depth = F.interpolate(depth.unsqueeze(1),
-                                  size=(height, width),
-                                  mode="bicubic",
-                                  align_corners=False)
-            depth_map = depth.squeeze().cpu().numpy()
+                # 3) Compute disparity (float32 pixels)
+                disp = depth_to_disparity(depth_map, max_shift)
 
-            # 3) Compute disparity (float32 pixels)
-            disp = depth_to_disparity(depth_map, max_shift)
+                # 4) Generate stereo pair (left|right)
+                sbs = generate_sbs(frame, disp)
+                proc.stdin.write(sbs.tobytes())
+                proc.stdin.flush()
 
-            # 4) Generate stereo pair (left|right)
-            sbs = generate_sbs(frame, disp)
-            proc.stdin.write(sbs.tobytes())
-
-            pbar.update(1)
+                pbar.update(1)
 
         pbar.close()
 
