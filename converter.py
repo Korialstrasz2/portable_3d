@@ -164,7 +164,7 @@ def mux_audio(tmp: Path, src: Path, out_: Path):
                    stderr=subprocess.STDOUT)
 
 # -------------------------------------------------------------------------
-def process_video(src_path: Path, out_dir: Path, max_shift: int):
+def process_video(src_path: Path, out_dir: Path, max_shift: int, enc_quality: str):
     """
     Core routine:
       1. Load Depth-Anything model
@@ -172,6 +172,7 @@ def process_video(src_path: Path, out_dir: Path, max_shift: int):
       3. Estimate depth ➔ disparity ➔ stereo pair
       4. Write silent stereo to temp MP4
       5. Mux audio into final MP4
+    enc_quality can be a bitrate string (e.g. "5M") or a CRF value ("23").
     """
     model, transform, device = load_depth_anything()
 
@@ -185,25 +186,40 @@ def process_video(src_path: Path, out_dir: Path, max_shift: int):
     sbs_w  = width * 2
     total  = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 0
 
-    # Choose H.264 (NVENC) or fallback to mp4v
-    fourcc_try = [("H264", "NVENC"), ("mp4v", "CPU")]
-    writer = None
+    # Choose FFmpeg encoder: NVENC if available, else libx264
+    encoder = "libx264"
+    if torch.cuda.is_available():
+        try:
+            subprocess.run([FFMPEG, "-hide_banner", "-h", "encoder=h264_nvenc"],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                           check=True)
+            encoder = "h264_nvenc"
+        except subprocess.CalledProcessError:
+            pass
+
     tmp_mp4 = out_dir / (src_path.stem + "_3D_TEMP.mp4")
 
-    for c, note in fourcc_try:
-        four = cv2.VideoWriter_fourcc(*c)
-        writer = cv2.VideoWriter(str(tmp_mp4), four, fps, (sbs_w, height))
-        if writer.isOpened():
-            enc_note = note
-            break
-        writer.release()
-        writer = None
-    if writer is None:
-        raise RuntimeError("Could not open VideoWriter with any codec")
+    ff_cmd = [
+        FFMPEG, "-y",
+        "-f", "rawvideo",
+        "-pix_fmt", "bgr24",
+        "-s", f"{sbs_w}x{height}",
+        "-r", str(fps),
+        "-i", "-",
+        "-c:v", encoder,
+        "-preset", "fast",
+    ]
+    if enc_quality.lower().endswith("m") or enc_quality.lower().endswith("k"):
+        ff_cmd += ["-b:v", enc_quality]
+    else:
+        ff_cmd += ["-crf", enc_quality]
+    ff_cmd += ["-pix_fmt", "yuv420p", str(tmp_mp4)]
+
+    proc = subprocess.Popen(ff_cmd, stdin=subprocess.PIPE)
 
     with torch.no_grad():
         pbar = tqdm(total=total if total else None,
-                    unit="frame", desc=f"Converting ({enc_note})")
+                    unit="frame", desc=f"Converting ({encoder})")
         while True:
             ret, frame = cap.read()
             if not ret:
@@ -230,14 +246,17 @@ def process_video(src_path: Path, out_dir: Path, max_shift: int):
 
             # 4) Generate stereo pair (left|right)
             sbs = generate_sbs(frame, disp)
-            writer.write(sbs)
+            proc.stdin.write(sbs.tobytes())
 
             pbar.update(1)
 
         pbar.close()
 
     cap.release()
-    writer.release()
+    proc.stdin.close()
+    proc.wait()
+    if proc.returncode != 0:
+        raise RuntimeError("FFmpeg encoding failed")
 
     # 5) Mux original audio into the silent stereo
     final_mp4 = out_dir / (src_path.stem + "_3D_HSBS.mp4")
@@ -276,6 +295,16 @@ def ask_shift(def_val=30):
     root.destroy()
     return v
 
+def ask_quality(def_val="23"):
+    root = Tk(); root.withdraw()
+    q = simpledialog.askstring(
+            "Encoding Quality",
+            "Enter bitrate (e.g. 5M) or CRF (0-51):",
+            initialvalue=def_val
+        )
+    root.destroy()
+    return q
+
 # -------------------------------------------------------------------------
 def main():
     print("=== Portable 2D-to-3D Converter (Depth-Anything) ===")
@@ -291,9 +320,13 @@ def main():
     if shift is None:
         return
 
+    quality = ask_quality()
+    if quality is None:
+        return
+
     try:
         t0 = time.time()
-        out = process_video(src, outdir, shift)
+        out = process_video(src, outdir, shift, quality)
         elapsed_min = (time.time() - t0) / 60
         messagebox.showinfo(
             "Done",
