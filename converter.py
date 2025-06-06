@@ -29,10 +29,20 @@ import sys
 # Make sure Python can see the "Depth-Anything" folder we just cloned:
 DA_ROOT = Path(__file__).parent / "Depth-Anything"
 if not DA_ROOT.exists():
-    raise FileNotFoundError(
-        f"Depth-Anything folder not found at {DA_ROOT}. "
-        "Did you remember to 'git clone https://github.com/LiheYoung/Depth-Anything.git Depth-Anything'?"
-    )
+    print(f"[SETUP] Cloning Depth-Anything into {DA_ROOT}...")
+    try:
+        subprocess.check_call([
+            "git",
+            "clone",
+            "https://github.com/LiheYoung/Depth-Anything.git",
+            str(DA_ROOT),
+        ])
+    except Exception as e:
+        raise FileNotFoundError(
+            f"Failed to clone Depth-Anything repository: {e}"\
+            "\nPlease install Git or manually clone "
+            "https://github.com/LiheYoung/Depth-Anything.git"
+        )
 sys.path.append(str(DA_ROOT))
 from depth_anything.dpt import DepthAnything
 from depth_anything.util.transform import Resize, NormalizeImage, PrepareForNet
