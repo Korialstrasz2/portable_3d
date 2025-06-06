@@ -48,9 +48,10 @@ Portable 2-D ➜ 3-D Converter (2025 Depth-Anything Edition)
    3. Select an output folder (where the 3-D video will be saved).
    4. Enter “Max pixel shift” (1–100). This controls perceived depth:
       • ~15–40 px is usually comfortable on most VR headsets.
-   5. The console shows a progress bar (“Converting (NVENC)” or “Converting (CPU)”).
+   5. (Optional) Specify a **near** and **far** depth in meters (blank = auto).
+   6. The console shows a progress bar (“Converting (NVENC)” or “Converting (CPU)”).
       • GPU (NVENC) encoding happens if your system supports it; otherwise falls back to CPU.
-   6. When done, you’ll see a popup with:
+   7. When done, you’ll see a popup with:
         Saved stereo video:
           <output_folder>\YourVideo_3D_HSBS.mp4
         Elapsed: X.Y min
@@ -110,6 +111,8 @@ Portable 2-D ➜ 3-D Converter (2025 Depth-Anything Edition)
   • If you want faster “preview” (lower quality), reduce the video resolution or use a smaller
     “Max pixel shift.” Also, you could swap the depth model in `converter.py` to MiDaS directly
     by replacing `load_depth_anything()` with plain MiDaS (still via torch.hub).
+
+  • You can limit the depth range by entering near/far values when prompted.
 
   • “Max pixel shift” controls 3-D strength. Too large → uncomfortable or “exaggerated” depth.
     Too small → 3-D effect looks flat. Start at 20–30 px, then adjust.

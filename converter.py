@@ -109,18 +109,78 @@ def load_depth_anything():
     return model, transform, device
 
 # -------------------------------------------------------------------------
-def depth_to_disparity(depth: np.ndarray, max_shift: int = 30) -> np.ndarray:
+def depth_to_disparity(
+    depth: np.ndarray,
+    max_shift: int = 30,
+    inv_min: float | None = None,
+    inv_max: float | None = None,
+    near_depth: float | None = None,
+    far_depth: float | None = None,
+) -> np.ndarray:
+    """Convert a depth map (float32) to a disparity map in pixels.
+
+    By default, scaling uses ``inv_min``/``inv_max`` collected from the entire
+    video.  ``near_depth`` and ``far_depth`` (in meters) override these values
+    when provided.
     """
-    Convert a depth map (float32) to a disparity map in pixels:
-      • Invert depth
-      • Normalize to [0,1]
-      • Blend/blur to remove tiny spikes
-      • Multiply by max_shift
-    """
+
     depth_inv = 1.0 / (depth + 1e-6)
-    d_norm = (depth_inv - depth_inv.min()) / (depth_inv.max() - depth_inv.min())
+
+    if near_depth is not None:
+        inv_max = 1.0 / (near_depth + 1e-6)
+    if far_depth is not None:
+        inv_min = 1.0 / (far_depth + 1e-6)
+
+    if inv_min is None:
+        inv_min = float(depth_inv.min())
+    if inv_max is None:
+        inv_max = float(depth_inv.max())
+    if inv_max - inv_min < 1e-6:
+        inv_max = inv_min + 1e-6
+
+    d_norm = np.clip((depth_inv - inv_min) / (inv_max - inv_min), 0.0, 1.0)
     d_blur = cv2.GaussianBlur(d_norm, (5, 5), 0)
     return (d_blur * max_shift).astype(np.float32)
+
+# -------------------------------------------------------------------------
+def compute_inv_depth_range(src: Path, model, transform, device,
+                            width: int, height: int) -> tuple[float, float]:
+    """Scan the video once to find global inverse depth range."""
+
+    cap = cv2.VideoCapture(str(src))
+    if not cap.isOpened():
+        raise RuntimeError(f"Cannot open video: {src}")
+    total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 0
+
+    inv_min = np.inf
+    inv_max = -np.inf
+
+    with torch.no_grad():
+        pbar = tqdm(total=total if total else None,
+                    unit="frame", desc="Scanning depth")
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                break
+
+            img_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
+            sample = {"image": img_rgb}
+            sample = transform(sample)
+            img_tens = torch.from_numpy(sample["image"]).unsqueeze(0).to(device)
+            depth = model(img_tens)
+            depth = F.interpolate(depth.unsqueeze(1),
+                                  size=(height, width),
+                                  mode="bicubic",
+                                  align_corners=False)
+            d = depth.squeeze().cpu().numpy()
+            inv = 1.0 / (d + 1e-6)
+            inv_min = min(inv_min, float(inv.min()))
+            inv_max = max(inv_max, float(inv.max()))
+            pbar.update(1)
+        pbar.close()
+
+    cap.release()
+    return inv_min, inv_max
 
 # -------------------------------------------------------------------------
 def generate_sbs(frame: np.ndarray, disp: np.ndarray) -> np.ndarray:
@@ -164,14 +224,23 @@ def mux_audio(tmp: Path, src: Path, out_: Path):
                    stderr=subprocess.STDOUT)
 
 # -------------------------------------------------------------------------
-def process_video(src_path: Path, out_dir: Path, max_shift: int):
+def process_video(
+    src_path: Path,
+    out_dir: Path,
+    max_shift: int,
+    near_depth: float | None = None,
+    far_depth: float | None = None,
+) -> Path:
     """
     Core routine:
       1. Load Depth-Anything model
-      2. Read each frame from src_path
+      2. Read each frame from ``src_path``
       3. Estimate depth ➔ disparity ➔ stereo pair
       4. Write silent stereo to temp MP4
       5. Mux audio into final MP4
+
+    ``near_depth`` and ``far_depth`` allow manual control over the depth range.
+    When ``None``, a preliminary scan collects global statistics for scaling.
     """
     model, transform, device = load_depth_anything()
 
@@ -184,6 +253,17 @@ def process_video(src_path: Path, out_dir: Path, max_shift: int):
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     sbs_w  = width * 2
     total  = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 0
+
+    # Global inverse depth range for consistent disparity scaling
+    inv_min = None
+    inv_max = None
+    if near_depth is None or far_depth is None:
+        inv_min, inv_max = compute_inv_depth_range(
+            src_path, model, transform, device, width, height)
+    if near_depth is not None:
+        inv_max = 1.0 / (near_depth + 1e-6)
+    if far_depth is not None:
+        inv_min = 1.0 / (far_depth + 1e-6)
 
     # Choose H.264 (NVENC) or fallback to mp4v
     fourcc_try = [("H264", "NVENC"), ("mp4v", "CPU")]
@@ -226,7 +306,14 @@ def process_video(src_path: Path, out_dir: Path, max_shift: int):
             depth_map = depth.squeeze().cpu().numpy()
 
             # 3) Compute disparity (float32 pixels)
-            disp = depth_to_disparity(depth_map, max_shift)
+            disp = depth_to_disparity(
+                depth_map,
+                max_shift,
+                inv_min=inv_min,
+                inv_max=inv_max,
+                near_depth=near_depth,
+                far_depth=far_depth,
+            )
 
             # 4) Generate stereo pair (left|right)
             sbs = generate_sbs(frame, disp)
@@ -276,6 +363,22 @@ def ask_shift(def_val=30):
     root.destroy()
     return v
 
+def ask_depth_range():
+    """Prompt for custom near/far depth in meters (optional)."""
+    root = Tk(); root.withdraw()
+    near_s = simpledialog.askstring(
+        "Depth Range",
+        "Near depth in meters (blank = auto):",
+    )
+    far_s = simpledialog.askstring(
+        "Depth Range",
+        "Far depth in meters (blank = auto):",
+    )
+    root.destroy()
+    near = float(near_s) if near_s else None
+    far = float(far_s) if far_s else None
+    return near, far
+
 # -------------------------------------------------------------------------
 def main():
     print("=== Portable 2D-to-3D Converter (Depth-Anything) ===")
@@ -291,9 +394,11 @@ def main():
     if shift is None:
         return
 
+    near, far = ask_depth_range()
+
     try:
         t0 = time.time()
-        out = process_video(src, outdir, shift)
+        out = process_video(src, outdir, shift, near, far)
         elapsed_min = (time.time() - t0) / 60
         messagebox.showinfo(
             "Done",
