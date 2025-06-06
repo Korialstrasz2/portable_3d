@@ -21,7 +21,6 @@ CHANGE LOG (2025-06):
 from pathlib import Path
 import subprocess, shutil, time, urllib.request
 import sys
-from pathlib import Path
 
 # Insert _after_ "import torch" but before any usage of load_depth_anything()
 # so that we can import DepthAnything from the cloned repo.
