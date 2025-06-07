@@ -234,6 +234,39 @@ def mux_audio(tmp: Path, src: Path, out_: Path):
                    stderr=subprocess.STDOUT)
 
 # -------------------------------------------------------------------------
+def process_image(
+    src_path: Path,
+    out_dir: Path,
+    max_shift: int,
+    near_depth: float | None = None,
+    far_depth: float | None = None,
+) -> Path:
+    """Convert a single image to a side-by-side stereo pair."""
+    model, transform, device = load_depth_anything()
+
+    img_bgr = cv2.imread(str(src_path))
+    if img_bgr is None:
+        raise RuntimeError(f"Cannot open image: {src_path}")
+
+    h, w = img_bgr.shape[:2]
+    img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
+    sample = {"image": img_rgb}
+    sample = transform(sample)
+    img_tens = torch.from_numpy(sample["image"]).unsqueeze(0).to(device)
+
+    with torch.no_grad():
+        depth = model(img_tens)
+        depth = F.interpolate(depth.unsqueeze(1), size=(h, w), mode="bicubic", align_corners=False)
+        depth_map = depth.squeeze().cpu().numpy()
+
+    disp = depth_to_disparity(depth_map, max_shift, near_depth=near_depth, far_depth=far_depth)
+    sbs = generate_sbs(img_bgr, disp)
+
+    out_path = out_dir / (src_path.stem + "_3D_HSBS.png")
+    cv2.imwrite(str(out_path), sbs)
+    return out_path
+
+# -------------------------------------------------------------------------
 def process_video(
     src_path: Path,
     out_dir: Path,
@@ -371,7 +404,11 @@ def choose_file(title):
     root = Tk(); root.withdraw()
     p = filedialog.askopenfilename(
             title=title,
-            filetypes=[("Video", "*.mp4 *.mkv *.mov *.avi"), ("All", "*.*")]
+            filetypes=[
+                ("Video", "*.mp4 *.mkv *.mov *.avi"),
+                ("Image", "*.png *.jpg *.jpeg *.bmp *.webp *.tif *.tiff"),
+                ("All", "*.*"),
+            ]
         )
     root.destroy()
     return Path(p) if p else None
@@ -428,7 +465,7 @@ def ask_quality():
 # -------------------------------------------------------------------------
 def main():
     print("=== Portable 2D-to-3D Converter (Depth-Anything) ===")
-    src = choose_file("Select a 2-D video")
+    src = choose_file("Select a 2-D video or image")
     if not src:
         return
 
@@ -441,19 +478,32 @@ def main():
         return
 
     near, far = ask_depth_range()
-    quality = ask_quality()
 
-    try:
-        t0 = time.time()
-        out = process_video(src, outdir, shift, near, far, quality)
-        elapsed_min = (time.time() - t0) / 60
-        messagebox.showinfo(
-            "Done",
-            f"Saved stereo video:\n{out}\nElapsed: {elapsed_min:.1f} min"
-        )
-    except Exception as e:
-        messagebox.showerror("Error", str(e))
-        raise
+    if src.suffix.lower() in {".png", ".jpg", ".jpeg", ".bmp", ".webp", ".tif", ".tiff"}:
+        try:
+            t0 = time.time()
+            out = process_image(src, outdir, shift, near, far)
+            elapsed_sec = time.time() - t0
+            messagebox.showinfo(
+                "Done",
+                f"Saved stereo image:\n{out}\nElapsed: {elapsed_sec:.1f} sec"
+            )
+        except Exception as e:
+            messagebox.showerror("Error", str(e))
+            raise
+    else:
+        quality = ask_quality()
+        try:
+            t0 = time.time()
+            out = process_video(src, outdir, shift, near, far, quality)
+            elapsed_min = (time.time() - t0) / 60
+            messagebox.showinfo(
+                "Done",
+                f"Saved stereo video:\n{out}\nElapsed: {elapsed_min:.1f} min"
+            )
+        except Exception as e:
+            messagebox.showerror("Error", str(e))
+            raise
 
 if __name__ == "__main__":
     main()

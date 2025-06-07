@@ -3,8 +3,8 @@ Portable 2-D ➜ 3-D Converter (2025 Depth-Anything Edition)
 ──────────────────────────────────────────────────────────────
 
 ■ OVERVIEW
-   This tool converts any 2-D video into a half-side-by-side (HSBS)
-   stereoscopic 3-D video, suitable for VR/AR playback. It uses:
+   This tool converts any 2-D video (or still image) into a half-side-by-side
+   (HSBS) stereoscopic 3‑D result, suitable for VR/AR playback. It uses:
      • Depth-Anything ViT-L-14 (state-of-the-art, metric depth, high detail)
      • CUDA-accelerated PyTorch for depth inference
      • OpenCV + FFmpeg (NVENC if available) for video I/O
@@ -45,20 +45,21 @@ Portable 2-D ➜ 3-D Converter (2025 Depth-Anything Edition)
 ───────────────────────────────────────────────────────────────────────
 ■ HOW TO USE
    1. After setup, a small console window and Tkinter dialog will appear.
-   2. Choose your source 2-D video (any common format: .mp4, .mkv, .mov, .avi).
-   3. Select an output folder (where the 3-D video will be saved).
+   2. Choose your source 2-D video or image
+      (videos: .mp4, .mkv, .mov, .avi; images: .png, .jpg, .bmp, .webp, .tif).
+   3. Select an output folder (where the 3-D result will be saved).
    4. Enter “Max pixel shift” (1–100). This controls perceived depth:
       • ~15–40 px is usually comfortable on most VR headsets.
    5. (Optional) Specify a **near** and **far** depth in meters (blank = auto).
    6. The console shows a progress bar (“Converting (NVENC)” or “Converting (CPU)”).
       • GPU (NVENC) encoding happens if your system supports it; otherwise falls back to CPU.
    7. When done, you’ll see a popup with:
-        Saved stereo video:
-          <output_folder>\YourVideo_3D_HSBS.mp4
-        Elapsed: X.Y min
-      This final file:
+        Saved stereo file:
+          <output_folder>\YourFile_3D_HSBS.(mp4|png)
+        Elapsed time shown
+      The final output:
         • Contains side-by-side (left|right) 3-D frames
-        • Has the original audio (losslessly copied via FFmpeg)
+        • Videos keep the original audio (losslessly copied via FFmpeg)
 
 ───────────────────────────────────────────────────────────────────────
 ■ FILES & FOLDERS AFTER SETUP
